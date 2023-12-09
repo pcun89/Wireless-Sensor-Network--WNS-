@@ -1,0 +1,128 @@
+import java.awt.event.WindowListener;
+import java.util.ArrayList;
+
+/**
+ * LatencyVisualization creates the visualizations for the liability analysis of the WARP program.
+ * <p>
+ * <p>
+ * CS2820 Fall 2023 Project: Implement this class to create the file visualization that is
+ * requested in Warp.
+ *
+ * @author Phillipp Cun
+ * @version 1.6
+ */
+public class LatencyVisualization extends VisualizationObject {
+
+    // TODO Auto-generated class stub for unimplemented visualization
+
+    private static final String SOURCE_SUFFIX = ".la";
+    private static final String OBJECT_NAME = "Latency Analysis";
+    private WarpInterface warp;
+    private LatencyAnalysis la;
+    private Program program; 
+    private Boolean deadLinesMet; 
+    private WorkLoad workload; 
+    
+
+  /**
+   * constructor
+   * @param warp
+   */
+  LatencyVisualization(WarpInterface warp) {
+        super(new FileManager(), warp, SOURCE_SUFFIX);
+        this.warp = warp;
+        this.la = warp.toLatencyAnalysis();
+        this.program = warp.toProgram(); 
+        this.deadLinesMet = warp.deadlinesMet(); 
+        this.workload = warp.toWorkload(); 
+    }
+  /**
+   * This method overrides default to provide a graphical representation of Latency Analysis.
+   * The method will creates a new instance of GuiVisualization that will contain the title, column headers,
+   * and visualization data specific to the Latency Analysis. It will then return the GuiVisualization object
+   * that can be used to display a graphical representation in the Java window when the -gui option is selected.
+   *
+   * @return A GuiVisualization object represent the graphical visualization of Latency Analysis.
+   */
+    @Override
+    public GuiVisualization displayVisualization() {
+        return new GuiVisualization(createTitle(), createColumnHeader(), createVisualizationData());
+    }
+    /**
+     * Creates and returns the header of Latency Analysis visualization. The header includes a title
+     * of the visualization and additional information that scheduler name and, if applicable,
+     * the number of faults in a program based on a special schedule or fault model.
+     *
+     * @return A Description object representing the header for the Latency Analysis visualization.
+     */
+    @Override
+    protected Description createHeader() {
+    	Description header = new Description(); 
+    	header.add(createTitle()); 
+    	header.add(String.format("Scheduler Name: %s\n", program.getSchedulerName())); 
+    	header.add(String.format("numFaults: %d\n", program.getNumFaults())); 
+    	
+    	return header; 
+    }
+    /**
+     * Creates and returns a column headers for the Latency Analysis visualization. The headers include
+     * a "Flow/Time Slot" column and additional columns corresponding to nodes in the program's schedule.
+     *
+     * @return An array of strings representing a column headers for the Latency Analysis visualization.
+     */
+    @Override
+    protected String[] createColumnHeader() {
+    	// Retrieving the program schedule from the associated WarpInterface
+    	var numColumns = la.getLatencyTable().getNumColumns();
+    	String[] columnNames = new String[numColumns + 1]; 
+    	columnNames[0] = "Flow/Time Slot"; 
+    	
+    	for (int time = 0; time < numColumns; time++) {
+    		columnNames[time + 1] = String.format("%d", time); 
+        }
+        return columnNames;
+    }
+    /**
+     * Create and return a visualization data for the Latency Analysis. When the visualization data has not
+     * been initialized, it will retrieves the workload and program schedule from a associated WarpInterface and
+     * populates the data array with the flow names and a corresponding schedule information.
+     *
+     *@return A 2D array of the string representing the visualization data of Latency Analysis.
+     * The first column contains flow names, and subsequent columns represent the program schedule.
+     */
+    @Override
+    public String[][] createVisualizationData() {
+    	if (visualizationData == null) {
+    		int numRows = la.getLatencyTable().getNumRows();
+    		int numColumns = la.getLatencyTable().getNumColumns() +1;
+    		ArrayList<String> flows = workload.getFlowNamesInPriorityOrder(); 
+    		visualizationData = new String[numRows][numColumns]; 
+    		for (int rows = 0; rows < numRows; rows++) {
+    			if (rows < flows.size()) {
+    				visualizationData[rows][0] = flows.get(rows);
+    			}
+    			for (int columns = 1; columns < numColumns; columns++) {
+    				String entry = la.getLatencyTable().get(rows, columns - 1); 
+    				if (entry == null) {
+    					visualizationData[rows][columns] = "-"; 
+    				} 
+    				else {
+    					visualizationData[rows][columns] = entry;
+    				}
+    			}
+    		}
+    	}
+    	return visualizationData; 
+    }
+    
+/**
+ * 
+ *Creates and returns, title for the Latency Analysis visualization. The title will includes the
+ *object name ("Latency Analysis") and the name of associated program's graph.
+ *
+ *@return A string representing the title for Latency Analysis visualization.
+ * */
+    private String createTitle() {
+        return String.format("%s for graph %s\n", OBJECT_NAME, warp.toProgram().getName());
+    }
+}
