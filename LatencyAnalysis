@@ -1,0 +1,557 @@
+package edu.uiowa.cs.warp;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+
+import edu.uiowa.cs.warp.WarpDSL.InstructionParameters;
+
+/**
+ * LatencyAnalysis checks the latency (finishTime - releaseTime) for each
+ * release of each flow for the WARP system. To be correct, the latency must be
+ * less than or equal than the flows deadline parameter.
+ * 
+ * @author Phillipp Cun 
+ * @version 1.6
+ */
+public class LatencyAnalysis {
+
+  private static String DEADLINE_MISS = " => DEADLINE MISS";
+  private static String FLOW_SEPARATOR = "******************************\n";
+  private static String DEADLINE = "D"; 
+  private static String RELEASE = "R"; 
+  private static String EXECUTING = "x";
+  private static String COMPLETE = "L"; 
+  
+  private Description latencyReport;
+  private WorkLoad workload;
+  private ProgramSchedule programTable;
+  private HashMap<String, Integer> nodeIndex;
+  private WarpDSL dsl;
+  private ArrayList<String> flows;
+  private ProgramSchedule latencyTable;
+ 
+
+
+  /**
+   * Constructs a LatencyAnalysis object using the given WarpInterface. This constructor
+   * is typically used when an interface to the WARP program is available.
+   * 
+   * @param warp Object providing an interface to the program to be analyzed.
+   */
+  LatencyAnalysis(WarpInterface warp) {
+    this(warp.toProgram());
+  }
+
+  /**
+   * Constructs a LatencyAnalysis object using a specific Program object. This constructor
+   * can be used when direct access to the WARP program object is available, bypassing the
+   * need for a WarpInterface.
+   * 
+   * @param program The Program object representing the WARP program to be analyzed.
+   */
+  LatencyAnalysis(Program program) {
+	    this.workload = program.toWorkLoad();
+	    this.programTable = program.getSchedule();
+	    flows = workload.getFlowNamesInPriorityOrder();
+	    this.nodeIndex = program.getNodeMapIndex();
+	    dsl = new WarpDSL();
+	    buildLatencyTable(); // Initialize latencyTable before building the report
+	    buildLatencyReport();
+	}
+  
+  /**
+   * Retrieves the latency table that has been built during the analysis.
+   * The latency table maps the flow executions to their respective time slots.
+   * 
+   * @return The latency table as a ProgramSchedule object.
+   */
+  public ProgramSchedule getLatencyTable() {
+	  return latencyTable; 
+  }
+  
+  /**
+   * Builds a detailed latency report for all flows in the WARP system. The report
+   * includes latency information for each flow instance, indicating whether it has met
+   * its deadline.
+   */
+  public void buildLatencyTable() {
+	  latencyTable = new ProgramSchedule(flows.size(), programTable.getNumRows()); 
+	  for (String flowName : flows) {
+		  for (int row = 0; row < programTable.getNumRows(); row++) {
+			  recordDeadline(flowName, row);
+			  recordRelease(flowName, row); 
+			  recordInstructions(flowName, row); 
+			  recordComplete(flowName, row); 
+			  
+		  }
+	  }
+  }
+
+  /**
+   * Get the latencyReport build by buildLatencyReport().
+   * 
+   * @return latencyReport
+   */
+  public Description latencyReport() {
+    return latencyReport;
+  }
+
+  /**
+   * Build a latency report. Flows are output in priority order (based on the
+   * priority used to build the program. The latency for each instance of the
+   * flow is reported as follows "Maximum latency for FlowName:Instance is
+   * Latency"
+   * 
+   * For flow instances that have latency > deadline, then the latency message
+   * is appended with the string " => DEADLINE MISS"
+   * 
+   * A line of 30 '*' characters separates each group of flow instance reports.
+   * 
+   * When there are not enough transmissions attempted between the release and
+   * the next release of an instance, then the latency is not computed (as we
+   * assume deadline less than or equal to the period. Thus, the report is:
+   * "UNKNOWN latency for FlowName:Instance; Not enough transmissions
+   * attempted".
+   * 
+   */
+  public void buildLatencyReport() {
+
+    latencyReport = new Description();
+    for (String flowName : flows) {
+      /* now remove the last flowSeparator line before returning */
+      // var lastLineIndex = latencyReport.size() - 1;
+      // latencyReport.remove(lastLineIndex);
+      reportLatency(flowName);
+    }
+  }
+
+  /**
+   * Computer and report the latency incurred for each release of Flow flowName.
+   * This method finds the flow's source and sink nodes. It also gets the number
+   * of transmission attempts required for last link in the flow. Then it loops
+   * through the hyperperiod calling the
+   * {@link #computeAndRecordFlowInstanceLatency(Integer, String, Integer, String, Integer, String, Integer, Integer)
+   * computeAndRecordFlowInstanceLatency} method to get the actual number of
+   * attempts made for each instance of the flow before its next release. If the
+   * number of attempts is less than that required, the deadline was missed and
+   * recorded by {@link #recordMissedDeadline(String, Integer, Integer)
+   * recordMissedDeadline}. A flow separation line is printed out after each
+   * instance's latency is reported.
+   * 
+   * @param flowName for which the latency of each instance will reported
+   */
+  public void reportLatency(String flowName) {
+    var time = 0;
+
+    var nodes = workload.getNodesInFlow(flowName); // names of nodes in flow
+    var flowSnkIndex = nodes.length - 1;
+    /* get snk of last link in the flow, which is also the Flow snk node */
+    String snk = nodes[flowSnkIndex];
+    /* get the src of last link in the flow */
+    String src = nodes[flowSnkIndex - 1];
+    /* get (column) indexes into programTable of these nodes */
+    var snkIndex = nodeIndex.get(snk);
+    var srcIndex = nodeIndex.get(src);
+    /*
+     * get the array containing the number of transmissions required for each
+     * link in the flow
+     */
+    var numTxAttemptsPerLink = workload.getNumTxAttemptsPerLink(flowName);
+    /* get the number of transmission required for the last link in the flow */
+    var numTxRequired = numTxAttemptsPerLink[numTxAttemptsPerLink.length - 1];
+    var numTxProcessed = 0; // num of Tx seen in the program schedule so far
+    var instance = 0;
+    var endTime = workload.getHyperPeriod();
+    while (time < endTime) {
+      numTxProcessed = computeAndRecordFlowInstanceLatency(time, flowName,
+          instance, src, srcIndex, snk, snkIndex, numTxRequired);
+      var deadline = workload.nextAbsoluteDeadline(flowName, time);
+      if (numTxProcessed < numTxRequired) {
+        /*
+         * This flow missed its deadline with required number of Tx!! This
+         * message should not be printed with the schedulers built
+         */
+        recordMissedDeadline(flowName, instance, deadline);
+      }
+      instance++;
+      time = workload.nextReleaseTime(flowName, time + 1);
+    }
+    recordFlowSeparator();
+  }
+
+  /**
+   * Computes the latency for the specified instance of the flow and calls
+   * {@link #recordLatency(String, Integer, Integer, Integer, Integer)
+   * recordLatency} to record the latency if all numTxRequired transmission
+   * attempts complete before the next release. The number of transmission
+   * attempts made before the next release is returned.
+   * 
+   * @param time          the current time slot
+   * @param flowName      flow to be analyzed
+   * @param instance      instance of the flow to be analyzed
+   * @param src           source node of the instruction being analyzed
+   * @param srcIndex      column index of the program table for the source node
+   * @param snk           sink node of the instruction being analyzed
+   * @param snkIndex      column index of the program table for the sink node
+   * @param numTxRequired number of transmission attempts required
+   * @return
+   */
+  public Integer computeAndRecordFlowInstanceLatency(Integer time,
+	      String flowName, Integer instance, String src, Integer srcIndex,
+	      String snk, Integer snkIndex, Integer numTxRequired) {
+
+	  System.out.println("Time: " + time + ", Flow: " + flowName + ", Instance: " + instance + ", Source: " + src);
+	  var releaseTime = workload.nextReleaseTime(flowName, time);
+	  System.out.println("Release Time: " + releaseTime);
+	  var nextReleaseTime = workload.nextReleaseTime(flowName, releaseTime);
+	  System.out.println("Next Release Time: " + nextReleaseTime);
+	  var numTxProcessed = 0; // num of Tx seen in the program schedule so far
+
+	  if (time >= nextReleaseTime) {
+	      System.out.println("Time is not less than Next Release Time, loop won't execute.");
+	  }
+
+	  while (time < nextReleaseTime) {
+	      System.out.println("In the loop, Time: " + time);
+	    	System.out.println("releasing");
+	        String instr1 = programTable.get(time, srcIndex);
+	        String instr2 = programTable.get(time, snkIndex);
+	        
+	        // Check and record execution at this time slot
+	        if (flowInstructing(flowName, instr1) || flowInstructing(flowName, instr2)) {
+	            recordInstructions(flowName, time); // This will put an 'x' in the table
+	        }
+
+	        numTxProcessed += numMatchingTx(flowName, src, snk, instr1);
+	        numTxProcessed += numMatchingTx(flowName, src, snk, instr2);
+
+	        if (numTxProcessed >= numTxRequired) {
+	            // Record completion if all transmissions are done
+	            recordComplete(flowName, time); // This should put an 'L' in the table
+	        }
+
+	        time++;
+	    }
+	    return numTxProcessed;
+	}
+
+
+  /**
+   * Evaluates the latency based on input parameters and records the maximum
+   * latency encountered or a deadline miss, as appropriate, in the
+   * latencyReport.
+   * 
+   * @param flowName    flow for which the latency is being recorded
+   * @param time        of the last push/pull instruction for this instance of
+   *                    the flow
+   * @param releaseTime time when this instance of the flow was released
+   * @param deadline    time which this instance of the flow must be completed
+   * @param instance    the number of times (-1) the flow has been released (1st
+   *                    release is instance 0)
+   */
+  public void recordLatency(String flowName, Integer time, Integer releaseTime,
+      Integer deadline, Integer instance) {
+    var latency = time - releaseTime + 1;
+    // report latency
+    String latencyMsg = String.format("Maximum latency for %s:%d is %d",
+        flowName, instance, latency);
+    if (latency > deadline) {
+      /* deadline missed, so color the text red */
+      latencyMsg += DEADLINE_MISS;
+    }
+    latencyMsg += "\n";
+    latencyReport.add(latencyMsg);
+  }
+
+  /**
+   * Adds an UNKNOWN latency report to the latencyReport when not enough
+   * transmission attempts were made before the next release of the flow.
+   * 
+   * @param flowName flow for which the deadline miss is being recorded
+   * @param instance instance number for the flow that missed its deadline
+   * @param deadline time which this instance of the flow was to have been
+   *                 completed
+   */
+  public void recordMissedDeadline(String flowName, Integer instance,
+      Integer deadline) {
+    String latencyMsg = String.format(
+        "UNKNOWN latency for %s:%d with deadline %d; Not enough transmissions attempted\n",
+        flowName, instance, deadline);
+    latencyReport.add(latencyMsg);
+  }
+
+  /**
+   * Adds the {@link #FLOW_SEPARATOR FLOW_SEPARATOR} line to the latencyReport.
+   */
+  public void recordFlowSeparator() {
+    String flowSeparator = FLOW_SEPARATOR;
+    latencyReport.add(flowSeparator);
+  }
+
+  /**
+   * Counts the number of push/pull instructions in the instruction string
+   * (input parameter) whose flow, src, and snk parameters match the input
+   * parameters.
+   * 
+   * @param flow  name of the flow to match
+   * @param src   source node of the instruction to match
+   * @param snk   sink node of the instruction to match
+   * @param instr string containing the instructions to be searched for matches
+   * @return numTx the number of matching push/pull instructions
+   */
+  public Integer numMatchingTx(String flow, String src, String snk,
+      String instr) {
+    var numTx = 0;
+
+    if (flow == null || src == null || snk == null || instr == null) {
+      /* make sure all parameters are valid */
+      return numTx;
+    }
+    /*
+     * get a Warp instruction parser object and then get the instruction
+     * parameters from the instruction string.
+     */
+    var instructionParametersArray = dsl.getInstructionParameters(instr);
+
+    for (InstructionParameters entry : instructionParametersArray) {
+      String flowName = entry.getFlow();
+      if (flowName.equals(flow)) {
+        /*
+         * This instruction is for the flow we want. (flow name is set for
+         * push/pull instructions, which are all we want. If not push/pull, then
+         * we skip this instruction.) If flow, src, and snk names in instruction
+         * match input parameters, then we have a Tx attempt.
+         */
+        if (src.equals(entry.getSrc()) && snk.equals(entry.getSnk())) {
+          /* flow, src, and snk match, so increment Tx attempts */
+          numTx++;
+        }
+      }
+    }
+    return numTx;
+  }
+  
+  /**
+   * Retrieves the index of a specified flow in the list of flows. So then 
+   * the method search for the specified flow name in list of flows
+   * so it could returns the index of the first occurrence. If the flow name is not
+   * found, it will thenreturns 0.
+   *
+   * @param flowName The name of the flow to find the index for.
+   * @return The index of the specified flow in the list, or 0 if not found.
+   * 
+   * Method is public for JUnit purposes, should be private
+   */
+  public Integer getFlowIndex(String flowName) {
+	  var index = 0; 
+	  //Iterate through the list of flow. 
+	  for (int flow = 0; flow < flows.size(); flow++) {
+		  //Checl flow name by matching a specific flowName. 
+		  if (flowName.equals(flows.get(flow))) {
+			  //Once the match is found then update the index and theen exit the loop. 
+			  index = flow; 
+			  break; 
+		  }
+	  }
+	  //return 0 if the match is not found.
+	  return index; 
+	  
+  }
+  /**
+   * This method is used to update an entry in the latency table for a specific flow at a specific time.
+   * It first retrieves the index of the flow in the latency table using the provided flow name.
+   * It then attempts to retrieve the current entry for the flow at the given time.
+   * If no entry exists (i.e., the entry is null), it sets the entry to the provided value.
+   * If an entry does exist, it appends the provided value to the existing entry.
+   * Finally, it updates the latency table with the new entry.
+   *
+   * @param flowName The name of the flow for which the entry is to be updated. This should be a non-null string.
+   * @param time The time at which the entry is to be updated. This should be a non-null integer.
+   * @param value The value to update the entry with. This should be a non-null string.
+   * 
+   * Method is public for JUnit purposes, should be private
+   */
+  public void updateEntry(String flowName, Integer time, String value) {
+	  var flow = getFlowIndex(flowName); 
+	  var entry = latencyTable.get(flow, time); 
+	  if (entry == null) {
+		  entry = value;
+	  } else {
+		  entry += value; 
+	  }
+	  latencyTable.set(flow, time, entry); 
+  }
+  
+  /**
+   * This method is used to determine if a specific flow is currently executing a particular instruction.
+   * It first checks if the flow or instruction is null, returning false if either is.
+   * It then retrieves the instruction parameters for the given instruction.
+   * It iterates over these parameters, checking if the flow associated with each parameter matches the given flow.
+   * If a match is found, it sets a flag to true indicating that the flow is executing the instruction.
+   * Finally, it returns this flag.
+   *
+   * @param flow The name of the flow we are interested in. This should be a non-null string.
+   * @param instr The instruction we are checking against. This should be a non-null string.
+   * @return A Boolean value. True if the flow is executing the instruction, false otherwise.
+   * 
+   * Method is public for JUnit purposes, should be private
+   */
+  public Boolean flowInstructing(String flow, String instr) {
+	  Boolean executing = false; 
+	  if (flow == null || instr == null) {
+		  return false; 
+	  }
+	  var instructionParametersArray = dsl.getInstructionParameters(instr); 
+	  for (InstructionParameters entry : instructionParametersArray) {
+		  String flowName = entry.getFlow(); 
+		  if (flowName.equals(flow)) {
+			  executing = true; 
+		  }
+	  }
+	  return executing; 
+  }
+  /**
+  * The flowExecuting method takes two parameters, flowName and instr, 
+  * and returns the count of occurrences where the specified flowName is found in the 
+  * list of flow names extracted from the instruction represented by the instr parameter.
+  *
+  * the method is counting how many times the specified flowName appears in the 
+  * list of flow names extracted from the given instruction instr. 
+  * The count is then returned as an Integer.
+  * 
+  * Method is public for JUnit purposes, should be private
+  **/ 
+  public Integer flowExecuting(String flowName, String instr) {
+	  Integer count = 0; 
+	  if (flowName == null || instr == null) {
+		  return 0; 
+	  }
+	  var instructionParameterArray = dsl.getInstructionParameters(instr); 
+	  for (InstructionParameters entry : instructionParameterArray) {
+		  var flow = entry.getFlow(); 
+		  if (flow.equals(flowName)) {
+			  count += 1; 
+		  }
+	  }
+	  return count; 
+  }
+  
+  /**
+   * This method is used to record the execution of a specific flow at a given time.
+   * It first prints a message to the console indicating that an execution is being recorded.
+   * It then iterates over all the columns in the program table.
+   * For each column, it retrieves the instruction at the intersection of the current time and the current column.
+   * It checks if the flow is executing this instruction.
+   * If it is, it prints a message to the console indicating that the flow is executing, updates the entry in the latency table to indicate execution, and breaks the loop.
+   *
+   * @param flowName The name of the flow for which the execution is to be recorded. This should be a non-null string.
+   * @param time The time at which the execution is to be recorded. This should be a non-null integer.
+   * 
+   * Method is public for JUnit purposes, should be private
+   */
+  public void recordInstructions(String flowName, int time) {
+	  for (int col = 0; col < programTable.getNumColumns(); col++) {
+		  String instr = programTable.get(time, col); 
+		  if (flowInstructing(flowName, instr) == true) {
+			  updateEntry(flowName, time, EXECUTING); 
+			  break;
+		  }
+	  }
+  }
+
+  /**
+   * This method is used to record the deadline of a specific flow at a given time.
+   * It first calculates the next absolute deadline for the flow using the provided flow name and time.
+   * It then checks if the flow is in a release state at the given time.
+   * If it is, it updates the entry in the latency table at the time of the next deadline to indicate a deadline.
+   *
+   * @param flowName The name of the flow for which the deadline is to be recorded. This should be a non-null string.
+   * @param time The time at which the deadline is to be recorded. This should be a non-null integer.
+   * 
+   * Method is public for JUnit purposes, should be private
+   */  
+  	public void recordDeadline(String flowName, Integer time) {
+  		Integer releaseTime = workload.nextReleaseTime(flowName, time); 
+  		Integer nextDeadline = workload.nextAbsoluteDeadline(flowName, time); 
+  		if (time == releaseTime) {
+			updateEntry(flowName, nextDeadline, DEADLINE); 
+	}
+}
+
+/**
+ * This method is used to record the release of a specific flow at a given time.
+ * It first checks if the flow is in a release state at the given time.
+ * If it is, it updates the entry in the latency table at the given time to indicate a release.
+ * It also updates the entry in the latency table at the time of the flow's deadline to indicate a deadline.
+ *
+ * @param flowName The name of the flow for which the release is to be recorded. This should be a non-null string.
+ * @param time The time at which the release is to be recorded. This should be a non-null integer.
+ * 
+ * Method is public for JUnit purposes, should be private
+ */
+  	public void recordRelease(String flowName, Integer time) {
+  		int releaseTime = workload.nextReleaseTime(flowName, time);
+  		if (time == releaseTime) {
+  			updateEntry(flowName, time, RELEASE); 
+	}
+}
+
+/**
+ * This method is used to count the number of executions ("x") in a specific flow instance starting from a given time.
+ * It first initializes a count to 0 and retrieves the initial entry in the latency table for the flow at the given time.
+ * If this initial entry contains an "x", it enters a loop that continues as long as the time is non-negative.
+ * In each iteration of the loop, it retrieves the entry for the flow at the current time.
+ * If this entry contains an "x", it increments the count.
+ * If the entry contains an "R", it returns the current count.
+ * If the entry is null or does not contain an "x" or an "R", it simply continues to the next iteration.
+ * After all iterations, it returns the count.
+ *
+ * @param flowName The name of the flow for which to count the executions. This should be a non-null string.
+ * @param time The time from which to start counting. This should be a non-null integer.
+ * @return The number of executions in the flow instance starting from the given time.
+ * 
+ * Method is public for JUnit purposes, should be private
+ */
+  	public Integer xInFlowInstance(String flowName, Integer time) {
+  		Integer count = 0; 
+  		while (time >=0) {
+  			String entry = latencyTable.get(flows.indexOf(flowName), time);
+  			for(int i = 0; i < programTable.getNumColumns(); i++) {
+  				String instr = programTable.get(time, i); 
+  				count += flowExecuting(flowName, instr); 
+  			}
+  			if (entry != null) {
+  				if (entry.contains("R")) {
+  					return count;
+  				}
+  			}
+  			time = time -1;
+  		}
+  		return count;
+}
+
+/**
+ * This method is used to record the completion of a specific flow at a given time.
+ * It first retrieves the entry in the latency table for the flow at the given time.
+ * If this entry contains an "x", it calculates the number of executions in the flow instance starting from the given time.
+ * It then prints a message to the console indicating the total number of transmission attempts in the flow.
+ * It retrieves the number of transmission attempts per link for the flow and the number of transmission attempts required for the last link.
+ * If the number of executions is greater than or equal to the number of transmission attempts required, it updates the entry in the latency table at the given time to indicate a completion.
+ *
+ * @param flowName The name of the flow for which the completion is to be recorded. This should be a non-null string.
+ * @param time The time at which the completion is to be recorded. This should be a non-null integer.
+ * 
+ * Method is public for JUnit purposes, should be private
+ */
+  	public void recordComplete(String flowName, Integer time) {
+  		String entry = latencyTable.get(flows.indexOf(flowName), time); 
+  		if (entry != null && entry.contains("x")) {
+  			Integer count = xInFlowInstance(flowName, time); 
+  			if (count >= workload.getTotalTxAttemptsInFlow(flowName)
+  					&& count.equals(xInFlowInstance(flowName, workload.nextReleaseTime(flowName, time)-1))) {
+  				updateEntry(flowName, time, COMPLETE); 
+  			}
+  		}
+  	}
+
+}
